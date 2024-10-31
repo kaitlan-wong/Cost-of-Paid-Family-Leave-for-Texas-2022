@@ -1,0 +1,351 @@
+---
+title: "Cost of Paid Family Leave for Texas, 2022"
+author: "Kaitlan Wong"
+format: html
+editor: visual
+---
+
+***This is the same as draft 3, but instead of 3 months I use 6 months when defining full and part time workers.***
+
+## Methods - Calculating Number of Employed People and Max Benefits Using ACS Data
+
+------------------------------------------------------------------------
+
+For this estimate, I am utilizing 2022 American Community Survey (ACS) 1-Year estimates from IPUMS USA. The parameters for estimating costs to Texas include:
+
+-   Max benefit of 12 weeks paid parental leave for all workers that have worked a minimum of **6 months** of full time employment, a **minimum of 6 months** of part time employments, or 540 hours in the last year. I provide a final breakdown of cost estimates by these three worker types.
+
+-   Salary replacement between 80 and 100 percent of worker's wages based on their weekly earnings.
+
+-   Maximum weekly benefit of \$1,117.69 (per Amanda's email).
+
+The ACS variables I am using include:
+
+-   [INCWAGE](https://usa.ipums.org/usa-action/variables/INCWAGE#description_section): total pre-tax wage and salary income - that is, money received as an employee - for the previous year.
+
+-   [EMPSTAT](https://usa.ipums.org/usa-action/variables/EMPSTAT#description_section): indicates whether the respondent was a part of the labor force \-- working or seeking work \-- and, if so, whether the person was currently unemployed
+
+-   [UHRSWORK](https://usa.ipums.org/usa-action/variables/UHRSWORK#description_section): number of hours per week that the respondent usually worked, if the person worked during the previous year.
+
+-   [WKSWORK1](https://usa.ipums.org/usa-action/variables/WKSWORK1#description_section): number of weeks that the respondent worked for profit, pay, or as an unpaid family worker during the previous year.
+
+I filtered the data to only be for the state of Texas (FIPS = 48) in IPUMS before downloading the data.
+
+## Load ACS Data
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library (ipumsr)
+library(writexl)
+```
+
+```{r}
+
+# Read in ipums data
+
+ddi <- read_ipums_ddi("usa_00038.xml")
+data <- read_ipums_micro(ddi, data_file = ("usa_00038.datgz"), verbose = FALSE)
+```
+
+```{r}
+
+# make variable name lowercase
+names(data) <- tolower(names(data))
+
+# preview data
+head(data)
+
+# check variable names are correct
+names(data)
+```
+
+## ACS Data Prep
+
+```{r}
+
+# convert data to tibble for better readability 
+work_data <- as_tibble(data)
+
+# Clean data
+work_data <- work_data %>%
+  mutate(
+    hryear = uhrswork * wkswork1, # create a variable for the hours worked a year
+    ft_workers = wkswork1 >= 24 & uhrswork >= 40, # full time workers
+    pt_workers = wkswork1 >= 24 & uhrswork < 40, # part time workers
+    hrs540_workers = hryear >=540
+         ) %>% 
+  
+  filter(
+    incwage != 999999, incwage != 999998, incwage > 0, # Remove invalid/missing income and unpaid family workers
+    empstat == 1, # keep only people employed last year
+    age >= 18, age <= 50 # keep only ages 18-50 years
+  )
+
+```
+
+```{r}
+
+# count full-time and part-time workers
+worker_counts <- work_data %>%
+  summarize(
+    full_time_count = sum(ft_workers, na.rm = TRUE),
+    part_time_count = sum(pt_workers, na.rm = TRUE)
+  )
+
+print(worker_counts)
+
+```
+
+## ACS Data Analysis
+
+### The Formula
+
+```{r}
+
+# Function to calculate weighted and unweighted means for each worker type
+calculate_means <- function(data, replacement_rate) {
+  data %>%
+    mutate(
+      wkwage = incwage / wkswork1,
+      mxbnft = wkwage * replacement_rate,
+      capped = pmin(mxbnft, 1117.69) # Cap at 1117.69
+    ) %>%
+    summarise(
+      ft_avg_ben_weighted = weighted.mean(capped[ft_workers], perwt[ft_workers]),
+      pt_avg_ben_weighted = weighted.mean(capped[pt_workers], perwt[pt_workers]),
+      hrs540_avg_ben_weighted = weighted.mean(capped[hrs540_workers], perwt[hrs540_workers])
+    ) %>%
+    mutate(replacement_rate = paste0(replacement_rate))
+}
+
+# Calculate means for each replacement rate and combine results
+replacement_rates <- c(0.8, 0.9, 1.0)
+final_results <- map_dfr(replacement_rates, ~ calculate_means(work_data, .x))
+
+print(final_results)
+```
+
+### Compare Number of Observations in ACS Data
+
+```{r}
+# I was curious how many observations I dropped after adding all my criteria
+
+cat("Number of observations in data:", nrow(data), "\n")
+cat("Number of observations in work_data:", nrow(work_data), "\n")
+
+```
+
+### Average Benefits using mxbnft
+
+Coda left a comment about how she was unsure if we should use **mxbnft** or **capped** to calculate the average max benefits. I am including the estimates using mxbnft as an option.
+
+```{r}
+
+# function to calculate weighted and unweighted means for each worker type using mxbnft instead of capped
+
+calculate_means_mxbnft  <- function(data, replacement_rate) {
+  data %>%
+    mutate(
+      wkwage = incwage / wkswork1,
+      mxbnft = wkwage * replacement_rate,
+    ) %>%
+    summarise(
+      ft_avg_ben_weighted = weighted.mean(mxbnft [ft_workers], perwt[ft_workers]),
+      pt_avg_ben_weighted = weighted.mean(mxbnft [pt_workers], perwt[pt_workers]),
+      hrs540_avg_ben_weighted = weighted.mean(mxbnft [hrs540_workers], perwt[hrs540_workers])
+    ) %>%
+    mutate(replacement_rate = paste0(replacement_rate))
+}
+
+# Calculate means for each replacement rate and combine results
+replacement_rates <- c(0.8, 0.9, 1.0)
+final_results_mxbnft <- map_dfr(replacement_rates, ~ calculate_means_mxbnft (work_data, .x))
+
+print(final_results_mxbnft)
+```
+
+### Figure out Eligible Workers
+
+```{r}
+
+# Calculate the total weight of the sample (result is total Texans eligible for parental leave)
+
+total_eligible <- sum(work_data$perwt)
+print(total_eligible)
+```
+
+## Using California Usage Rates
+
+##### Data for California is used since CPS data is unreliable for Texas.
+
+According to the California Employment Development Department (EDD), in 2022 the average monthly labor force participation rate in California was 61.65% and the average number of people employed was 18,350,233 *(Source: [EDD Tableau dashboard](https://public.tableau.com/app/profile/edd.lmid/viz/CaliforniaLaborMarketTopStatistics/UnemploymentRates))*.
+
+In 2022, there were a total of 298,503 total paid family leave claims paid by the state of California *(Source: [California Open Data Portal](https://data.ca.gov/dataset/paid-family-leave-pfl-monthly-data/resource/918a5226-0794-4e3e-a9a1-c82e11e0c164))*.
+
+The formula for take-up rates is the \# of family leave claims divided by total \# of people employed.
+
+The CA usage rate is therefore: 1.6% , which is much higher than the .79% rate from CS's 2013 paper.
+
+```{r}
+
+usage_rate = (298503 / 18350233)
+print(usage_rate)
+```
+
+## Estimate of Texans Who Will Use Paid Leave
+
+**Updated Numbers:**
+
+-   2022 Number of Eligible Workers in Texas: **9,925,102**
+
+-   If I calculate the number of people who used PPL using California's 2022 usage rate, the result is **161,451.**
+
+```{r}
+
+# calculate number of people who took parental leave
+took_leave <- total_eligible * usage_rate
+print(paste("# Took Leave:", took_leave))
+
+# Calculate weekly costs for each worker type and replacement rate
+weekly_costs <- final_results %>%
+  pivot_longer(
+    cols = starts_with("ft_"):starts_with("hrs540_"),
+    names_to = "worker_type",
+    values_to = "avg_ben_weighted"
+  ) %>%
+  mutate(
+    weekly_cost = took_leave * avg_ben_weighted,
+    worker_type = recode(worker_type,
+                         "ft_avg_ben_weighted" = "Full-Time",
+                         "pt_avg_ben_weighted" = "Part-Time",
+                         "hrs540_avg_ben_weighted" = "540+ Hours")
+  )
+
+# overall weekly cost per replacement rate (just summing full and part time)
+overall_totals_weekly <- weekly_costs %>%
+  filter(worker_type %in% c("Full-Time", "Part-Time")) %>%
+  group_by(replacement_rate) %>%
+  summarise(overall_weekly_cost = sum(weekly_cost))
+
+# annual costs by multiplying each weekly cost by 12
+annual_costs <- weekly_costs %>%
+  mutate(annual_cost = weekly_cost * 12) %>%
+  left_join(overall_totals_weekly, by = "replacement_rate")
+
+# overall annual cost per replacement rate (just summing full and part time)
+overall_totals_annual <- annual_costs %>%
+  filter(worker_type %in% c("Full-Time", "Part-Time")) %>%
+  group_by(replacement_rate) %>%
+  summarise(overall_annual_cost = sum(annual_cost))
+
+# Combine all into a single table with the specified columns
+final_table <- annual_costs %>%
+  left_join(overall_totals_annual, by = "replacement_rate") %>%
+  select(
+    replacement_rate,
+    worker_type,
+    avg_ben_weighted,
+    weekly_cost,
+    overall_weekly_cost,
+    annual_cost,
+    overall_annual_cost
+  )
+
+print(final_table)
+
+```
+
+Save Data To Excel
+
+```{r}
+write_xlsx(final_table, "final_pfl_2022_6months.xlsx")
+```
+
+### Summary of Findings (for Texas in 2022)
+
+***High level findings***
+
+|                                      |           |
+|--------------------------------------|-----------|
+| **Workers Eligible**                 | 9,925,102 |
+| **Number People Using Family Leave** | 161,451   |
+
+***Average Annual Costs by Worker Status and Cap Levels, 2022***
+
+|                                                                         | 80% Cap         | 90% Cap         | 100% Cap        |
+|-------------------------------|------------------|------------------|------------------|
+| Full-time (worked at least 6 months)                                    | \$1,485,655,299	 | \$1,582,943,084	 | \$1,664,831,297	 |
+| Part-time (worked at least 6 months)                                    | \$707,593,764	   | \$778,936,691	   | \$846,365,163   |
+| Worked at least 540 hours in last 12 months                             | \$1,350,897,842	 | \$1,443,974,873	 | \$1,523,729,566	 |
+| **Total Program Benefits Annual Costs (full-time + part-time workers)** | \$2,193,249,063 | \$2,361,879,775 | \$2,511,196,460 |
+
+## Note on CPS Data
+
+------------------------------------------------------------------------
+
+**Note from Coda's 2019 analysis:** *"Tried with CPS data using the "Why Absent" variables and observations dropped too low. The problem I encountered was that the \#'s for the maternal/paternal variable were too low."*
+
+I tried using more recent CPS data. Here are the umber of observations I got:
+
+-   42 in 2024
+
+-   76 in 2023
+
+-   87 in 2022
+
+-   50 in 2021
+
+-   0 in 2020
+
+-   0 in 2019
+
+-   0 in 2018
+
+-   0 in 2017
+
+Since these are very small population sizes, I decided not to use CPS data for the final analysis and instead use California Usage Rates.
+
+### Methods - Calculating the Number of People Taking Parental Leave Using CPS Data
+
+------------------------------------------------------------------------
+
+I am using Current Population Survey data from IPUMS CPS to calculate the rate of working Texas adults who took parental leave.
+
+The CPS variable I am using is:
+
+-   [WHYABSNT](https://cps.ipums.org/cps-action/variables/WHYABSNT#description_section): reports the reason for the absence of jobholders who were not working during the preceding week
+
+-   [WTFINL](https://cps.ipums.org/cps-action/variables/WTFINL#description_section): final person-level weight that should be used in analyses of basic monthly data.
+
+I filtered the data to only be for the state of Texas (FIPS = 48) in IPUMS before downloading the data.
+
+### Load CPS Data
+
+```{r}
+cps_ddi<- read_ipums_ddi("cps_00008.xml")
+cps_data <- read_ipums_micro(cps_ddi, data_file = ("cps_00008.dat.gz"), verbose = FALSE)
+
+# check out data
+names(cps_data) <- tolower(names(cps_data))
+head(cps_data)
+names(cps_data)
+```
+
+### CPS Data Prep
+
+```{r}
+# filter data
+cps_data2 <- filter(cps_data,
+                    whyabsnt == 9, # select only people who took parental leave
+                    year == 2024, # select year
+                    !is.na(wtfinl)) # remove missing values from final person weight  
+
+# # Weight the data by the final weight
+# cps_data3 <- svydesign(ids = ~pernum, weights = ~wtfinl, data = cps_data2)
+# # Calculate the number of workers who were absent from work on maternity/paternity leave
+# num_parental_leave <- svytotal(~1, design = cps_data3)
+# #Print the result
+# print(num_parental_leave)
+# #Count the number of observations for each value in the WHYABSNT variable in original dataset
+# table(cps_data$whyabsnt)
+```
